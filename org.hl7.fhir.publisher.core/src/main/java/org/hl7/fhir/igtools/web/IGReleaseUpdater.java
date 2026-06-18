@@ -335,7 +335,7 @@ public class IGReleaseUpdater {
       return false;
     }
     boolean vc = false;
-    IGReleaseVersionUpdater igvu = new IGReleaseVersionUpdater(vf, url, rootFolder, ignoreList, ignoreListOuter, version, folder);
+    IGReleaseVersionUpdater igvu = new IGReleaseVersionUpdater(vf, url, rootFolder, ignoreList, ignoreListOuter, version, folder, dynamicPublishBox);
     if (updateStatements) {
       PackageList pl = new PackageList(ig);
       PackageListEntry pv = pl.findByVersion(version.asString("version"));

@@ -93,29 +93,52 @@ public class PublishBoxStatementGenerator {
     return b.toString();
   }
 
-  // Self-contained, idempotent. Resolves package-list.json same-origin (derived from the canonical
-  // path, so it works under https without mixed-content), mirrors the server-side current-detection
-  // (current===true, not the ci-build "current" entry, path under canonical), and toggles wording.
+  // Self-contained, idempotent. One fetch of package-list.json (same-origin, derived from the
+  // canonical path so it works under https without mixed-content) drives both:
+  //   (1) the current-version reference (.fhir-pb-dynamic) — mirrors server-side current-detection
+  //       (current===true, not the ci-build "current" entry, path under canonical) and toggles wording;
+  //   (2) the "Page versions:" list (.fhir-pb-page-versions) — links this page across milestone folders,
+  //       HEAD-probing each so only milestones that actually contain this page are shown (matching the
+  //       server's behaviour) without baking the list into the page (so a new milestone never rewrites it).
   private static final String CURRENT_VERSION_SCRIPT =
     "<script type=\"text/javascript\">"
     + "(function(){"
     + "function cmp(a,b){if(a===b)return 0;function p(v){var s=String(v).split('-');return{n:s[0].split('.').map(function(x){return parseInt(x,10)||0;}),pre:s.length>1?s.slice(1).join('-'):null};}var pa=p(a),pb=p(b),i,m=Math.max(pa.n.length,pb.n.length);for(i=0;i<m;i++){var d=(pa.n[i]||0)-(pb.n[i]||0);if(d!==0)return d>0?1:-1;}if(pa.pre&&!pb.pre)return -1;if(!pa.pre&&pb.pre)return 1;if(pa.pre&&pb.pre)return pa.pre<pb.pre?-1:(pa.pre>pb.pre?1:0);return 0;}"
     + "function sh(el,on){if(el)el.style.display=on?'':'none';}"
-    + "function init(){var boxes=document.querySelectorAll('span.fhir-pb-dynamic');if(!boxes.length)return;Array.prototype.forEach.call(boxes,function(box){"
-    + "if(box.getAttribute('data-pb-done'))return;box.setAttribute('data-pb-done','1');"
-    + "var canonical=box.getAttribute('data-pb-canonical');var thisVer=box.getAttribute('data-pb-version');var plUrl;"
-    + "try{plUrl=new URL(canonical,document.baseURI).pathname.replace(/\\/$/,'')+'/package-list.json';}catch(e){return;}"
+    + "function pn(u){try{return new URL(u,document.baseURI).pathname.replace(/\\/+$/,'');}catch(e){return null;}}"
+    + "function init(){"
+    + "var dyn=document.querySelectorAll('span.fhir-pb-dynamic');"
+    + "var pv=document.querySelectorAll('span.fhir-pb-page-versions');"
+    + "if(!dyn.length&&!pv.length)return;"
+    + "var canonical=dyn.length?dyn[0].getAttribute('data-pb-canonical'):null;"
+    + "if(!canonical)return;"
+    + "var plUrl=pn(canonical);if(!plUrl)return;plUrl=plUrl+'/package-list.json';"
     + "fetch(plUrl,{cache:'no-cache'}).then(function(r){return r.json();}).then(function(pl){"
-    + "var cur=null,list=(pl&&pl.list)||[];list.forEach(function(e){if(e&&e.current===true&&e.version!=='current'&&typeof e.path==='string'&&e.path.indexOf(canonical)===0){cur=e;}});"
-    + "if(!cur)return;"
+    + "var list=(pl&&pl.list)||[];"
+    + "var cur=null;list.forEach(function(e){if(e&&e.current===true&&e.version!=='current'&&typeof e.path==='string'&&e.path.indexOf(canonical)===0){cur=e;}});"
+    + "if(cur)Array.prototype.forEach.call(dyn,function(box){"
+    + "if(box.getAttribute('data-pb-done'))return;box.setAttribute('data-pb-done','1');"
+    + "var thisVer=box.getAttribute('data-pb-version');"
     + "Array.prototype.forEach.call(box.querySelectorAll('.fhir-pb-current-version'),function(s){s.textContent=cur.version;});"
     + "Array.prototype.forEach.call(box.querySelectorAll('a.fhir-pb-current-link'),function(a){a.setAttribute('href',cur.path);});"
     + "var d=cmp(cur.version,thisVer);"
-    + "sh(box.querySelector('.fhir-pb-superseded'),d>0);"
-    + "sh(box.querySelector('.fhir-pb-iscurrent'),d===0);"
-    + "sh(box.querySelector('.fhir-pb-prerelease'),d<0);"
+    + "sh(box.querySelector('.fhir-pb-superseded'),d>0);sh(box.querySelector('.fhir-pb-iscurrent'),d===0);sh(box.querySelector('.fhir-pb-prerelease'),d<0);"
+    + "});"
+    + "var ms=list.filter(function(e){return e&&e.milestoneName&&typeof e.path==='string'&&e.path.indexOf(canonical)===0;});"
+    + "Array.prototype.forEach.call(pv,function(span){"
+    + "if(span.getAttribute('data-pb-done'))return;span.setAttribute('data-pb-done','1');"
+    + "var thisVer=span.getAttribute('data-pb-version');"
+    + "var mine=list.filter(function(e){return e.version===thisVer;})[0];"
+    + "var myBase=mine?pn(mine.path):null;var here=location.pathname;"
+    + "var rel=(myBase&&here.indexOf(myBase+'/')===0)?here.slice(myBase.length+1):here.substring(here.lastIndexOf('/')+1);"
+    + "Promise.all(ms.map(function(m){var href=pn(m.path)+'/'+rel;"
+    + "if(m.version===thisVer)return Promise.resolve({m:m,href:href,ok:true,self:true});"
+    + "return fetch(href,{method:'HEAD'}).then(function(r){return{m:m,href:href,ok:r.ok,self:false};}).catch(function(){return{m:m,href:href,ok:false};});"
+    + "})).then(function(res){var parts=res.filter(function(x){return x.ok;}).map(function(x){return x.self?('<b>'+x.m.milestoneName+'</b>'):('<a data-no-external=\"true\" href=\"'+x.href+'\">'+x.m.milestoneName+'</a>');});"
+    + "if(parts.length){span.innerHTML='. Page versions: '+parts.join(' ');}});"
+    + "});"
     + "}).catch(function(){});"
-    + "});}"
+    + "}"
     + "if(document.readyState!=='loading'){init();}else{document.addEventListener('DOMContentLoaded',init);}"
     + "})();"
     + "</script>";

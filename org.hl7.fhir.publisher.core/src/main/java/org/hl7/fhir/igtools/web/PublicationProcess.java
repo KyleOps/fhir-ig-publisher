@@ -1046,7 +1046,7 @@ public class PublicationProcess {
   }
 
   private void updatePublishBox(PackageList pl, PackageListEntry plVer, String destVer, String pathVer, String destination, String rootFolder, boolean current, ServerType serverType, File sft, List<String> ignoreList, String url, boolean jsonXmlClones, boolean dynamicPublishBox) throws FileNotFoundException, IOException {
-    IGReleaseVersionUpdater igvu = new IGReleaseVersionUpdater(destVer, url, rootFolder, ignoreList, null, plVer.json(), destination);
+    IGReleaseVersionUpdater igvu = new IGReleaseVersionUpdater(destVer, url, rootFolder, ignoreList, null, plVer.json(), destination, dynamicPublishBox);
     String fragment = PublishBoxStatementGenerator.genFragment(pl, plVer, pl.current(), pl.canonical(), current, false, dynamicPublishBox);
     System.out.println("Publish Box Statement: "+fragment);
     igvu.updateStatement(fragment, current ? 0 : 1, pl.milestones());
