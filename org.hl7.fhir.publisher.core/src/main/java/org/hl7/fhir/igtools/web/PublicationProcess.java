@@ -597,6 +597,7 @@ public class PublicationProcess {
                          Date genDate, String username, String version, String gitSrcId, String tcName, String tcPath, PackageListEntry tcVer, String workingRoot, boolean jsonXmlClones, File igBuildZipDir, File previousPackageFile, String[] args, String replaces) throws Exception {
     // ok. all our tests have passed.
     // 1. do the publication build(s)
+    boolean dynamicPublishBox = pubSetup.getJsonObject("website").asBoolean("dynamic-publish-box");
     List<String> existingFiles = new ArrayList<>();
     if (mode == PublicationProcessMode.CREATION) {
       System.out.println("All checks passed. Create an empty history at "+destination);              
@@ -605,19 +606,45 @@ public class PublicationProcess {
 
       // create a temporary copy and build in that:
       File temp = cloneToTemp(tempDir, fSource, npm.name()+"#"+npm.version());
-      File tempM = null; 
+      File tempM = null;
       System.out.println("Build IG at "+fSource.getAbsolutePath()+": final copy suitable for publication (in "+temp.getAbsolutePath()+")");
       String[] baseParams = new String[] {"-publish", pathVer, "-no-exit" };
       String tx = getNamedParam(args, "-tx");
       if (tx != null) {
         baseParams = Utilities.concatStringArray(baseParams, new String[] {"-tx", tx});
       }
-      runBuild(qa, temp.getAbsolutePath(), Utilities.concatStringArray(baseParams, new String[] {"-ig", temp.getAbsolutePath(), "-resetTx"}));
+
+      // Lever C (-reuse-build, opt-in, off by default): the publication pipeline normally renders the IG
+      // twice (an -ig step, then this -publish render). When -reuse-build is passed AND the pre-built
+      // output that was cloned into temp/output was itself rendered in PUBLICATION mode for this exact
+      // pathVer (verified via the qa.json "publication-url" marker), adopt it instead of re-rendering.
+      // Any mismatch falls back to the full render, so this can never publish stale/non-publication output.
+      boolean reuseBuild = hasParam(args, "-reuse-build");
+      boolean reused = false;
+      if (reuseBuild) {
+        if (isReusablePublicationBuild(temp, pathVer)) {
+          System.out.println("[-reuse-build] Adopting pre-built publication output at "+Utilities.path(temp.getAbsolutePath(), "output")+" (skipping the internal -publish render for "+pathVer+")");
+          reused = true;
+        } else {
+          System.out.println("[-reuse-build] Pre-built output is not a verified PUBLICATION build for "+pathVer+" - performing a full -publish render");
+        }
+      }
+      if (!reused) {
+        runBuild(qa, temp.getAbsolutePath(), Utilities.concatStringArray(baseParams, new String[] {"-ig", temp.getAbsolutePath(), "-resetTx"}));
+      }
 
       if (mode != PublicationProcessMode.WORKING) {
         tempM = cloneToTemp(tempDir, temp, npm.name()+"#"+npm.version()+"-milestone");
-        System.out.println("Build IG at "+fSource.getAbsolutePath()+": final copy suitable for publication (in "+tempM.getAbsolutePath()+") (milestone build)");        
-        runBuild(qa, tempM.getAbsolutePath(), Utilities.concatStringArray(baseParams, new String[] {"-ig", tempM.getAbsolutePath(), "-milestone"}));
+        // The only render-time difference between a -publish and a -milestone build is related-IG link
+        // targets (canonical vs web-location). When the IG declares no related IGs, the milestone render
+        // is byte-identical to the (reused) -publish render, so we can reuse it too; otherwise re-render.
+        boolean reuseMilestone = reused && !hasRelatedIGs(prSrc);
+        if (reuseMilestone) {
+          System.out.println("[-reuse-build] No related IGs declared - reusing the publication output for the milestone build too (in "+tempM.getAbsolutePath()+")");
+        } else {
+          System.out.println("Build IG at "+fSource.getAbsolutePath()+": final copy suitable for publication (in "+tempM.getAbsolutePath()+") (milestone build)");
+          runBuild(qa, tempM.getAbsolutePath(), Utilities.concatStringArray(baseParams, new String[] {"-ig", tempM.getAbsolutePath(), "-milestone"}));
+        }
       }
 
       // 2. make a copy of what we built
@@ -646,7 +673,7 @@ public class PublicationProcess {
       System.out.println("Update "+Utilities.path(destination, "package-list.json"));    
       PackageListEntry plVer = updatePackageList(pl, fSource.getAbsolutePath(), prSrc, pathVer,  Utilities.path(destination, "package-list.json"), mode, date,
               npm.fhirVersion(), Utilities.pathURL(pubSetup.asString("url"), tcName), subPackages, prSrc.asString("previouslyPublishedAs"));
-      updatePublishBox(pl, plVer, destVer, pathVer, destination, fRoot.getAbsolutePath(), false, ServerType.fromCode(pubSetup.getJsonObject("website").asString("server")), sft, null, url, jsonXmlClones);
+      updatePublishBox(pl, plVer, destVer, pathVer, destination, fRoot.getAbsolutePath(), false, ServerType.fromCode(pubSetup.getJsonObject("website").asString("server")), sft, null, url, jsonXmlClones, dynamicPublishBox);
 
       if (mode != PublicationProcessMode.WORKING || prSrc.has("movedFrom")) {
         String igSrc = tempM == null ? null : Utilities.path(tempM.getAbsolutePath(), "output");
@@ -663,6 +690,9 @@ public class PublicationProcess {
         
         List<String> ignoreList = new ArrayList<>();
         ignoreList.add(destVer);
+        if (dynamicPublishBox) {
+          System.out.println("dynamic-publish-box enabled: skipping the per-past-version publish box rewrite (resolved client-side from package-list.json) - the version tree is not required locally");
+        }
         // get the current content from the source
         for (PackageListEntry v : pl.versions()) {
           if (v != plVer) {
@@ -670,13 +700,23 @@ public class PublicationProcess {
             if (path != null) {
               String relPath = FileUtilities.getRelativePath(fRoot.getAbsolutePath(), path);
               ignoreList.add(path);
-              src.needFolder(relPath, false);
-              if (!v.cibuild() && (!v.current() || prSrc.has("movedFrom"))) {
-                String pv = v.path();
-                String vCode = pv.substring(pv.lastIndexOf("/")+1);
-                String dv = Utilities.path(fRoot, relPath);
-                System.out.println("Update publish box for version "+v.version()+" @ "+v.path());
-                updatePublishBox(pl, v, dv, pv, destination, fRoot.getAbsolutePath(), false, null, null, null, url, jsonXmlClones);
+              // When dynamic-publish-box is enabled, the per-version publish box (current-version
+              // reference + "Page versions" list) is resolved client-side from package-list.json, so
+              // every past version's pages are byte-identical regardless of which version is current.
+              // Rewriting them therefore produces no changes - pure overhead that also forces the
+              // entire version tree to be present locally (src.needFolder copies each one in). Skip
+              // pulling each old version into the working tree and skip the no-op rewrite, so a
+              // milestone no longer requires the full tree. ignoreList is still populated above, so
+              // any old versions that do happen to be present remain protected from the delete sweep.
+              if (!dynamicPublishBox) {
+                src.needFolder(relPath, false);
+                if (!v.cibuild() && (!v.current() || prSrc.has("movedFrom"))) {
+                  String pv = v.path();
+                  String vCode = pv.substring(pv.lastIndexOf("/")+1);
+                  String dv = Utilities.path(fRoot, relPath);
+                  System.out.println("Update publish box for version "+v.version()+" @ "+v.path());
+                  updatePublishBox(pl, v, dv, pv, destination, fRoot.getAbsolutePath(), false, null, null, null, url, jsonXmlClones, dynamicPublishBox);
+                }
               }
             }
           }
@@ -698,11 +738,11 @@ public class PublicationProcess {
           }
           String vCode = tcPath.substring(tcPath.lastIndexOf("/")+1);
           String dv = Utilities.path(destination, vCode);
-          updatePublishBox(pl, tcVer, dv, tcPath, destination, fRoot.getAbsolutePath(), false, null, null, null, url, jsonXmlClones);
+          updatePublishBox(pl, tcVer, dv, tcPath, destination, fRoot.getAbsolutePath(), false, null, null, null, url, jsonXmlClones, dynamicPublishBox);
         }
         // we do this first in the output so we can get a proper diff
         if (igSrc != null) {
-          updatePublishBox(pl, plVer, igSrc, pathVer, igSrc, fRoot.getAbsolutePath(), true, ServerType.fromCode(pubSetup.getJsonObject("website").asString("server")), sft, null, url, jsonXmlClones);
+          updatePublishBox(pl, plVer, igSrc, pathVer, igSrc, fRoot.getAbsolutePath(), true, ServerType.fromCode(pubSetup.getJsonObject("website").asString("server")), sft, null, url, jsonXmlClones, dynamicPublishBox);
 
           System.out.println("Check for Files to delete");
           List<String> newFiles = igSrc == null ? new ArrayList<>() : FileUtilities.listAllFiles(igSrc, null);
@@ -730,7 +770,7 @@ public class PublicationProcess {
               ignoreList.add(Utilities.path(dpath, v.path().substring(path.length()+1)));
             }
           }
-          updatePublishBox(pl, pl.current(), dpath, path, dpath, fRoot.getAbsolutePath(), true, null, null, ignoreList, url, jsonXmlClones);
+          updatePublishBox(pl, pl.current(), dpath, path, dpath, fRoot.getAbsolutePath(), true, null, null, ignoreList, url, jsonXmlClones, dynamicPublishBox);
         }
       } else {
         src.cleanFolder(relDest);
@@ -1044,9 +1084,9 @@ public class PublicationProcess {
     return sdf.format(date);
   }
 
-  private void updatePublishBox(PackageList pl, PackageListEntry plVer, String destVer, String pathVer, String destination, String rootFolder, boolean current, ServerType serverType, File sft, List<String> ignoreList, String url, boolean jsonXmlClones) throws FileNotFoundException, IOException {
-    IGReleaseVersionUpdater igvu = new IGReleaseVersionUpdater(destVer, url, rootFolder, ignoreList, null, plVer.json(), destination);
-    String fragment = PublishBoxStatementGenerator.genFragment(pl, plVer, pl.current(), pl.canonical(), current, false);
+  private void updatePublishBox(PackageList pl, PackageListEntry plVer, String destVer, String pathVer, String destination, String rootFolder, boolean current, ServerType serverType, File sft, List<String> ignoreList, String url, boolean jsonXmlClones, boolean dynamicPublishBox) throws FileNotFoundException, IOException {
+    IGReleaseVersionUpdater igvu = new IGReleaseVersionUpdater(destVer, url, rootFolder, ignoreList, null, plVer.json(), destination, dynamicPublishBox);
+    String fragment = PublishBoxStatementGenerator.genFragment(pl, plVer, pl.current(), pl.canonical(), current, false, dynamicPublishBox);
     System.out.println("Publish Box Statement: "+fragment);
     igvu.updateStatement(fragment, current ? 0 : 1, pl.milestones());
     System.out.println("  .. "+igvu.getCountTotal()+" files checked, "+igvu.getCountUpdated()+" updated");
@@ -1251,6 +1291,41 @@ public class PublicationProcess {
     return null;
   }
 
+  private static boolean hasParam(String[] args, String param) {
+    for (String a : args) {
+      if (param.equals(a)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Lever C (-reuse-build): true when the output cloned into temp/output was rendered in PUBLICATION
+   * mode for exactly this pathVer. The publisher records that path in qa.json as "publication-url" only
+   * when run with -publish; a normal -ig (MANUAL) build has no such marker, so this returns false and
+   * the caller falls back to a full render.
+   */
+  private boolean isReusablePublicationBuild(File temp, String pathVer) {
+    try {
+      File fQA = new File(Utilities.path(temp.getAbsolutePath(), "output", "qa.json"));
+      if (!fQA.exists()) {
+        return false;
+      }
+      JsonObject tqa = JsonParser.parseObject(loadFile("Reuse-build QA file", fQA.getAbsolutePath()));
+      String pubUrl = tqa.asString("publication-url");
+      return pubUrl != null && pubUrl.equals(pathVer);
+    } catch (Exception e) {
+      System.out.println("[-reuse-build] Could not verify pre-built output ("+e.getMessage()+") - performing a full render");
+      return false;
+    }
+  }
+
+  private boolean hasRelatedIGs(JsonObject prSrc) {
+    JsonObject related = prSrc.getJsonObject("related");
+    return related != null && !related.getProperties().isEmpty();
+  }
+
 
   private List<ValidationMessage> processWithdrawal(String source, String web, String url, String date, Date dd, String registrySource, String history,
       String templateSrc, String temp, PublisherConsoleLogger logger, String[] args, String destination,
@@ -1345,7 +1420,7 @@ public class PublicationProcess {
         String vCode = pv.substring(pv.lastIndexOf("/")+1);
         String dv = Utilities.path(destination, vCode);
         System.out.println("Update publish box for version "+v.version()+" @ "+v.path());
-        updatePublishBox(pl, v, dv, pv, destination, fRoot.getAbsolutePath(), false, null, null, null, url, false);
+        updatePublishBox(pl, v, dv, pv, destination, fRoot.getAbsolutePath(), false, null, null, null, url, false, pubSetup.getJsonObject("website").asBoolean("dynamic-publish-box"));
       }
     }
 
