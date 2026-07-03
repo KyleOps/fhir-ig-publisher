@@ -51,9 +51,10 @@ jobs:
       - name: Resolve versions and assert they match
         id: ver
         run: |
-          pubver=$(grep -m1 -oE '<version>[0-9][^<]+' fhir-ig-publisher/pom.xml | sed -E 's#</?version>##g')
+          # Project versions: anchor on the root <artifactId> (a bare -m1 <version> grabs a plugin version).
+          pubver=$(grep -A5 '<artifactId>org.hl7.fhir.publisher</artifactId>' fhir-ig-publisher/pom.xml | grep -m1 -oE '<version>[^<]+' | sed -E 's#<version>##')
           wantcore=$(grep -m1 -oE '<core_version>[^<]+' fhir-ig-publisher/pom.xml | sed -E 's#<core_version>##')
-          havecore=$(grep -m1 -oE '<version>[0-9][^<]+' core/pom.xml | sed -E 's#</?version>##g')
+          havecore=$(grep -A5 '<artifactId>org.hl7.fhir.core</artifactId>' core/pom.xml | grep -m1 -oE '<version>[^<]+' | sed -E 's#<version>##')
           echo "publisher=$pubver ; publisher wants core=$wantcore ; patched core=$havecore"
           echo "pubver=$pubver" >> "$GITHUB_OUTPUT"
           echo "core=$wantcore" >> "$GITHUB_OUTPUT"
