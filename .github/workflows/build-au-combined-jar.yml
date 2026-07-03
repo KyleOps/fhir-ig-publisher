@@ -65,9 +65,12 @@ jobs:
 
       - name: Build and install patched core to local m2
         working-directory: core
+        # Exclude org.hl7.fhir.validation.cli: it has compile-scope deps on sibling test-jars
+        # (:jar:tests:), which maven.test.skip=true does not build, so Maven would try to fetch
+        # them from the github-releases package repo and 401. The publisher does not use it.
         run: |
-          mvn -B install -DskipTests -Dmaven.test.skip=true -Dmaven.javadoc.skip=true \
-            -Dmaven.source.skip=true -Dmaven.gpg.skip=true -Dspotless.check.skip=true
+          mvn -B install -pl '!org.hl7.fhir.validation.cli' -DskipTests -Dmaven.test.skip=true \
+            -Dmaven.javadoc.skip=true -Dmaven.source.skip=true -Dmaven.gpg.skip=true -Dspotless.check.skip=true
 
       - name: Build shaded publisher jar
         working-directory: fhir-ig-publisher
