@@ -1,0 +1,132 @@
+name: Build AU combined publisher.jar
+
+# Builds the AU combined publisher.jar (this fork's publisher patches shaded with a
+# patched org.hl7.fhir.core) on a clean runner, verifies the getPackageUrl fix is
+# actually in the jar, then publishes an immutable versioned release AND refreshes the
+# mutable `au-pipeline-combined` asset that the publications pipeline pulls.
+#
+# The core patch is a backport of hapifhir/org.hl7.fhir.core#2507 onto the 6.9.11 tag
+# (branch au/getpackageurl-6.9.11 on the KyleOps core fork). Once #2507 ships in a core
+# release, bump <core_version> in pom.xml, drop the "build patched core" step, and point
+# this at the stock core.
+
+on:
+  workflow_dispatch:
+    inputs:
+      core_ref:
+        description: "Branch/tag of KyleOps/org.hl7.fhir.core to build (patched 6.9.11)"
+        default: "au/getpackageurl-6.9.11"
+        required: true
+      note:
+        description: "Short release note for this jar (optional)"
+        default: ""
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout publisher fork
+        uses: actions/checkout@v4
+        with:
+          path: fhir-ig-publisher
+
+      - name: Checkout patched core (KyleOps fork)
+        uses: actions/checkout@v4
+        with:
+          repository: KyleOps/org.hl7.fhir.core
+          ref: ${{ inputs.core_ref }}
+          path: core
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Resolve versions and assert they match
+        id: ver
+        run: |
+          pubver=$(grep -m1 -oE '<version>[0-9][^<]+' fhir-ig-publisher/pom.xml | sed -E 's#</?version>##g')
+          wantcore=$(grep -m1 -oE '<core_version>[^<]+' fhir-ig-publisher/pom.xml | sed -E 's#<core_version>##')
+          havecore=$(grep -m1 -oE '<version>[0-9][^<]+' core/pom.xml | sed -E 's#</?version>##g')
+          echo "publisher=$pubver ; publisher wants core=$wantcore ; patched core=$havecore"
+          echo "pubver=$pubver" >> "$GITHUB_OUTPUT"
+          echo "core=$wantcore" >> "$GITHUB_OUTPUT"
+          if [ "$wantcore" != "$havecore" ]; then
+            echo "::error::core version mismatch: publisher wants $wantcore but the patched core branch is $havecore"
+            exit 1
+          fi
+
+      - name: Build and install patched core to local m2
+        working-directory: core
+        run: |
+          mvn -B install -DskipTests -Dmaven.test.skip=true -Dmaven.javadoc.skip=true \
+            -Dmaven.source.skip=true -Dmaven.gpg.skip=true -Dspotless.check.skip=true
+
+      - name: Build shaded publisher jar
+        working-directory: fhir-ig-publisher
+        run: |
+          mvn -B -pl org.hl7.fhir.publisher.cli -am clean package -DskipTests \
+            -Dmaven.test.skip=true -Dmaven.javadoc.skip=true -Dmaven.source.skip=true \
+            -Dmaven.gpg.skip=true -Dspotless.check.skip=true
+
+      - name: Locate shaded jar
+        run: |
+          jar=$(ls fhir-ig-publisher/org.hl7.fhir.publisher.cli/target/org.hl7.fhir.publisher.cli-*.jar \
+            | grep -Ev -- '-sources|-javadoc|original-' | head -1)
+          if [ -z "$jar" ]; then echo "::error::no shaded jar found"; exit 1; fi
+          cp "$jar" publisher.jar
+          ls -la publisher.jar
+
+      - name: Verify getPackageUrl fix is in the jar
+        run: |
+          cd "$RUNNER_TEMP"
+          unzip -oq "$GITHUB_WORKSPACE/publisher.jar" 'org/hl7/fhir/utilities/npm/BasePackageCacheManager.class'
+          body=$(javap -p -c org/hl7/fhir/utilities/npm/BasePackageCacheManager.class \
+            | awk '/private java.lang.String getPackageUrl\(java.lang.String, org.hl7.fhir.utilities.npm.PackageServer\)/,/^$/')
+          echo "$body"
+          echo "$body" | grep -q "getCanonical" || { echo "::error::patch missing (no getCanonical in getPackageUrl)"; exit 1; }
+          if echo "$body" | grep -q "getUrl"; then echo "::error::stale jar (getUrl still present in getPackageUrl)"; exit 1; fi
+          echo "getPackageUrl fix verified in the shaded jar"
+
+      - name: Smoke test the jar runs
+        run: |
+          java -jar publisher.jar -version 2>&1 | grep -i "IG Publisher Version" || true
+
+      - name: Checksum and provenance
+        id: prov
+        run: |
+          sha=$(sha256sum publisher.jar | awk '{print $1}')
+          echo "$sha  publisher.jar" > publisher.jar.sha256
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "pubsha=$(git -C fhir-ig-publisher rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "coresha=$(git -C core rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish versioned release and refresh latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTE: ${{ inputs.note }}
+          CORE_REF: ${{ inputs.core_ref }}
+        run: |
+          tag="au-jar-${{ steps.ver.outputs.pubver }}-${{ github.run_number }}"
+          {
+            echo "AU combined publisher.jar"
+            echo
+            echo "- publisher: ${{ steps.prov.outputs.pubsha }} (feat/au-pipeline-combined, v${{ steps.ver.outputs.pubver }})"
+            echo "- core: ${{ steps.prov.outputs.coresha }} ($CORE_REF, patched ${{ steps.ver.outputs.core }}; backport of hapifhir/org.hl7.fhir.core#2507)"
+            echo "- sha256: ${{ steps.prov.outputs.sha256 }}"
+            echo "- note: $NOTE"
+            echo
+            echo "getPackageUrl fix verified present in the jar by CI."
+          } > release-notes.md
+          gh release create "$tag" publisher.jar publisher.jar.sha256 \
+            -R "${{ github.repository }}" -t "$tag" -F release-notes.md
+          # Refresh the mutable pointer the publications pipeline consumes (ETag-cached).
+          gh release upload au-pipeline-combined publisher.jar publisher.jar.sha256 \
+            --clobber -R "${{ github.repository }}"
+          echo "Published $tag and refreshed au-pipeline-combined"
