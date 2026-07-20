@@ -5,8 +5,8 @@ name: Build AU combined publisher.jar
 # actually in the jar, then publishes an immutable versioned release AND refreshes the
 # mutable `au-pipeline-combined` asset that the publications pipeline pulls.
 #
-# The core patch is a backport of hapifhir/org.hl7.fhir.core#2507 onto the 6.9.11 tag
-# (branch au/getpackageurl-6.9.11 on the KyleOps core fork). Once #2507 ships in a core
+# The core patch is a backport of hapifhir/org.hl7.fhir.core#2507 onto the 6.9.12 tag
+# (branch au/getpackageurl-6.9.12 on the KyleOps core fork). Once #2507 ships in a core
 # release, bump <core_version> in pom.xml, drop the "build patched core" step, and point
 # this at the stock core.
 
@@ -14,8 +14,8 @@ on:
   workflow_dispatch:
     inputs:
       core_ref:
-        description: "Branch/tag of KyleOps/org.hl7.fhir.core to build (patched 6.9.11)"
-        default: "au/getpackageurl-6.9.11"
+        description: "Branch/tag of KyleOps/org.hl7.fhir.core to build (patched 6.9.12)"
+        default: "au/getpackageurl-6.9.12"
         required: true
       note:
         description: "Short release note for this jar (optional)"
